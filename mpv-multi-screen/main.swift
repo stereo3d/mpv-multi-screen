@@ -1,4 +1,6 @@
 //
+// by Alaric Hamacher. 2025
+
 //  Play multiple instances of MPV player, fullscreen across multiple screens
 //
 //------------------------------------------------------------------------------
@@ -6,6 +8,41 @@ import Foundation
 import AppKit
 
 //------------------------------------------------------------------------------
+// Determine mpv executable path for later use
+let mpvExecutable: String = {
+    if FileManager.default.isExecutableFile(atPath: "/opt/homebrew/bin/mpv") {
+        return "/opt/homebrew/bin/mpv"
+    } else {
+        return "/usr/bin/env"
+    }
+}()
+
+//------------------------------------------------------------------------------
+// Handle "list" command to show audio devices
+if CommandLine.argc > 1 && CommandLine.arguments[1] == "list" {
+    // Run mpv with --audio-device=help to list audio devices
+    let task = Process()
+    if mpvExecutable == "/usr/bin/env" {
+        task.launchPath = mpvExecutable
+        task.arguments = ["mpv", "--audio-device=help"]
+    } else {
+        task.launchPath = mpvExecutable
+        task.arguments = ["--audio-device=help"]
+    }
+    let pipe = Pipe()
+    task.standardOutput = pipe
+    task.launch()
+    task.waitUntilExit()
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    if let output = String(data: data, encoding: .utf8) {
+        let lines = output.split(separator: "\n").map { String($0) }
+        for (i, line) in lines.enumerated() {
+            print("[\(i)] \(line)")
+        }
+    }
+    exit(0)
+}
+
 if (CommandLine.argc - 1) != NSScreen.screens.count {
     print("Number of files does not match number of screens\n")
     exit(0)
