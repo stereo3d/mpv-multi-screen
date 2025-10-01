@@ -13,11 +13,17 @@ let mpvExecutable: String = {
     if FileManager.default.isExecutableFile(atPath: "/opt/homebrew/bin/mpv") {
         return "/opt/homebrew/bin/mpv"
     } else {
-        return "/usr/bin/env"
+        return "/usr/bin/env" // fallback to PATH
     }
 }()
 
-let audioConfigPath = (NSTemporaryDirectory() as NSString).appendingPathComponent("mpv-multi-screen.audio.conf")
+// Persistent config location: ~/Library/Application Support/mpv-multi-screen/audio.conf
+let audioConfigPath: String = {
+    let base = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Application Support/mpv-multi-screen")
+    try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true, attributes: nil)
+    return base.appendingPathComponent("audio.conf").path
+}()
 
 @discardableResult
 func runMPVAndCapture(_ args: [String]) -> String {
@@ -81,10 +87,12 @@ if CommandLine.argc > 1 && CommandLine.arguments[1] == "list" {
     for (i, dev) in devices.enumerated() {
         print("[\(i)] \(dev.1)")
     }
-    print("\nUse: mpv-multi-screen setaudio <idx1> <idx2> ... (one per screen, in order)")
+    print("\nConfig will be saved to: \(audioConfigPath)")
+    print("Use: mpv-multi-screen setaudio <idx1> <idx2> ... (one per screen, in order)")
     exit(0)
 }
 
+// Handle "setaudio" command to save per-screen audio devices by index
 if CommandLine.argc > 1 && CommandLine.arguments[1] == "setaudio" {
     let devices = mpvAudioDevices()
     if devices.isEmpty {
@@ -108,7 +116,7 @@ if CommandLine.argc > 1 && CommandLine.arguments[1] == "setaudio" {
     let payload = chosen.joined(separator: "\n") + "\n"
     do {
         try payload.write(to: URL(fileURLWithPath: audioConfigPath), atomically: true, encoding: .utf8)
-        print("Saved \(chosen.count) audio device(s) to \(audioConfigPath).")
+        print("Saved \(chosen.count) audio device(s) → \(audioConfigPath)")
         exit(0)
     } catch {
         print("Failed to write audio config: \(error)")
@@ -126,18 +134,22 @@ let screenIDs: [Int] = NSScreen.screens.compactMap {
     ( $0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber )?.intValue
 }
 
-// Optional per-screen audio output devices (in screen order).
-// Run `mpv --audio-device=help` to list valid device names.
+// Optional per-screen audio output devices (fallback if no saved config).
+// Run `mpv --audio-device=help` to list valid device tokens.
 let audioDevicesPerScreen: [String] = [
     // "auto",
     // "coreaudio/USB PnP Sound Device",
     // "coreaudio/HDMI"
 ]
 
+// Load saved audio device tokens (one per line)
 let savedAudioDevices: [String] = {
     if FileManager.default.fileExists(atPath: audioConfigPath),
        let text = try? String(contentsOfFile: audioConfigPath, encoding: .utf8) {
-        return text.split(separator: "\n").map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        return text
+            .split(separator: "\n")
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
     }
     return []
 }()
@@ -152,13 +164,12 @@ for i in 1...Int(CommandLine.argc - 1) {
 //------------------------------------------------------------------------------
 func shell(_ args: [String]) {
     let task = Process()
-    // Prefer env-based resolution so PATH is honored; fall back to a common Homebrew path.
-    if FileManager.default.isExecutableFile(atPath: "/opt/homebrew/bin/mpv") {
-        task.launchPath = "/opt/homebrew/bin/mpv"
-        task.arguments = args
-    } else {
-        task.launchPath = "/usr/bin/env"
+    if mpvExecutable == "/usr/bin/env" {
+        task.launchPath = mpvExecutable
         task.arguments = ["mpv"] + args
+    } else {
+        task.launchPath = mpvExecutable
+        task.arguments = args
     }
     task.launch()
 }
@@ -170,14 +181,12 @@ for (idx, file) in files.enumerated() {
 
     var args: [String] = [
         "--fs",                    // fullscreen
-        "--screen=\(idx)",         // which display
+        "--screen=\(idx)",         // which display (0-based)
         "--loop",                  // loop playlist
         "--no-terminal",           // suppress terminal UI
-        "--no-config"              // ignore user config for consistency
+        "--no-config",             // ignore user config for consistency
+        "--no-osc"                 // hide on-screen controls
     ]
-
-    // If you want to hide the OSC (on-screen controls):
-    args.append("--no-osc")
 
     // Assign per-screen audio device (prefer saved config; fallback to static array)
     if idx < savedAudioDevices.count {
