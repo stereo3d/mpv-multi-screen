@@ -121,7 +121,7 @@ if CommandLine.argc > 1 && CommandLine.arguments[1] == "list" {
         print("[\(i)] \(dev.1)")
     }
     print("\nConfig will be saved to: \(audioConfigPath)")
-    print("Use: mpv-multi-screen setaudio <idx1> <idx2> ... (one per screen, in order)")
+    print("Use: mpv-multi-screen setaudio <idx[,vol]> <idx[,vol]> ...  (one per screen, in order; vol = 0–100)")
     exit(0)
 }
 
@@ -133,26 +133,45 @@ if CommandLine.argc > 1 && CommandLine.arguments[1] == "setaudio" {
     }
     let idxArgs = Array(CommandLine.arguments.dropFirst(2))
     if idxArgs.isEmpty {
-        print("Usage: mpv-multi-screen setaudio <idx1> <idx2> ...")
+        print("Usage: mpv-multi-screen setaudio <idx[,vol]> <idx[,vol]> ...")
+        print("Example: mpv-multi-screen setaudio 12,100 13,45   # screen1→device#12@100%, screen2→device#13@45%")
         exit(2)
     }
-    var chosen: [String] = []
-    for s in idxArgs {
-        if let n = Int(s), n >= 0, n < devices.count {
-            chosen.append(devices[n].0)
-        } else {
-            print("Invalid index: \(s). Run 'mpv-multi-screen list' to see valid indexes.")
+
+    struct Choice { let token: String; let volume: Int? }
+    var chosen: [Choice] = []
+
+    for arg in idxArgs {
+        // Accept formats: "12" or "12,80"
+        let parts = arg.split(separator: ",", maxSplits: 1, omittingEmptySubsequences: true)
+        guard let idxVal = Int(parts[0]), idxVal >= 0, idxVal < devices.count else {
+            print("Invalid index: \(arg). Run 'mpv-multi-screen list' to see valid indexes.")
             exit(3)
         }
+        var vol: Int? = nil
+        if parts.count == 2 {
+            guard let v = Int(parts[1]), (0...100).contains(v) else {
+                print("Invalid volume in '\(arg)'. Volume must be 0–100.")
+                exit(4)
+            }
+            vol = v
+        }
+        chosen.append(Choice(token: devices[idxVal].0, volume: vol))
     }
-    let payload = chosen.joined(separator: "\n") + "\n"
+
+    // Write config as lines: <token>\t<volume or empty>
+    let payload = chosen.map { c in
+        if let v = c.volume { return "\(c.token)\t\(v)" }
+        else { return "\(c.token)\t" }
+    }.joined(separator: "\n") + "\n"
+
     do {
         try payload.write(to: URL(fileURLWithPath: audioConfigPath), atomically: true, encoding: .utf8)
         print("Saved \(chosen.count) audio device(s) → \(audioConfigPath)")
         exit(0)
     } catch {
         print("Failed to write audio config: \(error)")
-        exit(4)
+        exit(5)
     }
 }
 
@@ -172,16 +191,27 @@ for i in 1...argCount {
     mediaLists.append(expandMedia(from: CommandLine.arguments[i]))
 }
 
-// Collect per‑screen audio device tokens (persisted in audio.conf). If fewer are provided than screens, the remainder has no explicit device.
-let savedAudioDevices: [String] = {
-    if FileManager.default.fileExists(atPath: audioConfigPath),
-       let text = try? String(contentsOfFile: audioConfigPath, encoding: .utf8) {
-        return text
-            .split(separator: "\n")
-            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
+// Collect per‑screen audio device tokens (and optional volumes) from audio.conf.
+// Each line: <token>\t<volume?>   where volume is 0–100 (optional).
+let savedAudio: [(token: String, volume: Int?)] = {
+    guard FileManager.default.fileExists(atPath: audioConfigPath),
+          let text = try? String(contentsOfFile: audioConfigPath, encoding: .utf8) else {
+        return []
     }
-    return []
+    var out: [(String, Int?)] = []
+    for raw in text.split(separator: "\n") {
+        let line = String(raw).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !line.isEmpty else { continue }
+        let parts = line.split(separator: "\t", maxSplits: 1, omittingEmptySubsequences: false)
+        let token = parts.count > 0 ? String(parts[0]) : ""
+        var vol: Int? = nil
+        if parts.count == 2 {
+            let vstr = String(parts[1]).trimmingCharacters(in: .whitespaces)
+            if let v = Int(vstr), (0...100).contains(v) { vol = v }
+        }
+        if !token.isEmpty { out.append((token, vol)) }
+    }
+    return out
 }()
 
 // Optional static fallback (only used if no saved token for that screen)
@@ -204,9 +234,12 @@ for (idx, list) in mediaLists.enumerated() {
         "--no-osc"
     ]
 
-    // Per-screen audio routing (prefer saved tokens; fallback to static array)
-    if idx < savedAudioDevices.count {
-        args.append("--audio-device=\(savedAudioDevices[idx])")
+    // Per-screen audio routing (prefer saved config; fallback to static array)
+    if idx < savedAudio.count {
+        args.append("--audio-device=\(savedAudio[idx].token)")
+        if let vol = savedAudio[idx].volume {
+            args.append("--volume=\(vol)")
+        }
     } else if idx < audioDevicesPerScreen.count {
         args.append("--audio-device=\(audioDevicesPerScreen[idx])")
     }
